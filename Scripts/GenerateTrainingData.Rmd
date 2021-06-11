@@ -1,0 +1,487 @@
+---
+title: "Training data for structural perception"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+library(tidyverse)
+library(magrittr)
+library(RsSimulx)
+library(data.table)
+library(viridis)
+
+DIR_DERIVED = "../DerivedData"
+DERIVED_COMPLETE_CC = paste( DIR_DERIVED, "TFPerception_deterministic.csv", sep="/")
+DERIVED_COMPLETE_Y = paste( DIR_DERIVED, "TFPerception_stochastic.csv", sep="/")
+DERIVED_TRAIN_CC = paste( DIR_DERIVED, "TFPerception_deterministic_train.csv", sep="/")
+DERIVED_TRAIN_Y = paste( DIR_DERIVED, "TFPerception_stochastic_train.csv", sep="/")
+```
+
+# Models
+```{r}
+study_t <- c(seq(0,4,0.5), 5:12, 16, 24) # sampling points
+study_n <- 1000 # sims per group
+```
+
+
+## 1CMT intravascular
+```{r}
+model.1cmt.iv <- inlineModel("
+[LONGITUDINAL]
+input = {V, Cl, adde}
+EQUATION:
+Cc = pkmodel(V,Cl)
+
+DEFINITION:
+y = {distribution=lognormal, prediction=Cc, sd=adde}
+
+[INDIVIDUAL]
+input = {V_min, V_max, Cl_min, Cl_max }
+
+DEFINITION:
+V = {distribution=uniform, min=V_min, max=V_max}
+Cl = {distribution=uniform, min=Cl_min, max=Cl_max}")
+
+adm <- list(time=0, amount=1000) # list(time=seq(0,66,by=12), amount=100)
+y <- list(name="y", time=study_t) #seq(18, 80, by=6))
+Cc <- list(name="Cc", time=study_t ) #seq(0,100, by=0.5))
+V <- list(name="V")
+p <- c(V_min=1, V_max=200, Cl_min=0.1, Cl_max=20, adde=0.2)
+p <- c(V_min=5, V_max=200, Cl_min=1, Cl_max=15, adde=0.2)
+g <- list(size=study_n*3) # oversample because we'll remove extreme profiles 
+
+model.1cmt.iv.res <- simulx(model    = model.1cmt.iv, 
+              output    = list(Cc,y),
+              parameter = p,
+              treatment = adm,
+              group     = g,
+              settings  = list(seed=123456))
+
+hist( model.1cmt.iv.res$parameter$V)
+hist( model.1cmt.iv.res$parameter$Cl)
+
+ggplot( model.1cmt.iv.res$Cc, aes(time, Cc, group=id)) +
+  geom_line( alpha=0.2) 
+
+prctilemlx(model.1cmt.iv.res$Cc, number=9, level=90, color="#4682b4" ) 
+```
+
+remove uninformative profiles
+
+```{r}
+#TODO: clean and combine conditions
+
+df.no_elimination <- model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == 2, Cc_std > 0.1) %>% 
+  ungroup()
+
+dim(df.no_elimination)
+
+df.not1CMT <- model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == max(time), Cc_std < 0.2) %>% 
+  ungroup()
+
+dim(df.not1CMT)
+
+matched <- sample( intersect( df.no_elimination$id, df.not1CMT$id),
+                   size = study_n,
+                   replace = F )
+
+model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) +
+  labs( title="Before")
+
+model.1cmt.iv.res$Cc %<>%
+  filter( id %in% matched ) 
+
+model.1cmt.iv.res$y %<>%
+  filter( id %in% matched )
+
+model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) +
+  labs( title="After")
+```
+
+remove uninformative profiles
+
+```{r eval=F}
+df <- model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == max(time), Cc_std < 0.2) %>% 
+  ungroup() %>% 
+  arrange( id, time )%>% 
+  sample_n( size=study_n, replace = F)
+
+model.1cmt.iv.res$Cc %<>%
+  filter( id %in% df$id ) 
+
+model.1cmt.iv.res$y %<>%
+  filter( id %in% df$id )
+
+model.1cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) 
+  scale_y_log10()
+```
+
+## 1CMT extravascular
+```{r}
+model.1cmt.oa <- inlineModel("
+[LONGITUDINAL]
+input = {V, Cl, ka, adde}
+EQUATION:
+Cc = pkmodel(V,Cl,ka)
+
+DEFINITION:
+y = {distribution=lognormal, prediction=Cc, sd=adde}
+
+[INDIVIDUAL]
+input = {V_min, V_max, Cl_min, Cl_max, ka_min, ka_max }
+
+DEFINITION:
+V = {distribution=uniform, min=V_min, max=V_max}
+Cl = {distribution=uniform, min=Cl_min, max=Cl_max}
+ka = {distribution=uniform, min=ka_min, max=ka_max}" )
+
+adm <- list(time=0, amount=1000) # list(time=seq(0,66,by=12), amount=100)
+y <- list(name="y", time=study_t) #seq(18, 80, by=6))
+Cc <- list(name="Cc", time=study_t ) #seq(0,100, by=0.5))
+V <- list(name="V")
+Cl <- list(name="Cl")
+ka <- list(name="ka")
+g <- list(size=study_n*2) # oversample, to remove uninformative profiles
+
+p <- c(V_min=1, V_max=100, Cl_min=0.1, Cl_max=20, ka_min=0.1, ka_max=0.7, adde=0.2)
+
+model.1cmt.oa.res <- simulx(model    = model.1cmt.oa, 
+              output    = list(Cc,y, V, Cl, ka),
+              parameter = p,
+              treatment = adm,
+              group     = g,
+              settings  = list(seed=42))
+
+ggplot( model.1cmt.oa.res$Cc, aes(time, Cc, group=id)) +
+  geom_line( alpha=0.2) 
+
+prctilemlx(model.1cmt.oa.res$Cc, number=9, level=90, color="#4682b4" ) 
+```
+
+Remove untypical profiles (less than 20% Cend/Cmax)
+
+```{r}
+df <- model.1cmt.oa.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == max(time), Cc_std < 0.2) %>% 
+  ungroup() %>% 
+  arrange( id, time )%>% 
+  sample_n( size=study_n, replace = F)
+
+model.1cmt.oa.res$Cc %<>%
+  filter( id %in% df$id ) 
+
+model.1cmt.oa.res$y %<>%
+  filter( id %in% df$id )
+
+model.1cmt.oa.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) 
+  scale_y_log10()
+```
+
+
+## 2CMT intravascular
+```{r}
+model.2cmt.iv <- inlineModel("
+[LONGITUDINAL]
+input = {V, Cl, Q, V2, adde}
+EQUATION:
+Cc = pkmodel(V, k=Cl/V, k12=Q/V, k21=Q/V2)
+
+DEFINITION:
+y = {distribution=lognormal, prediction=Cc, sd=adde}
+
+[INDIVIDUAL]
+input = {V_min, V_max, Cl_min, Cl_max, V2_min, V2_max, Q_min, Q_max }
+
+DEFINITION:
+V = {distribution=uniform, min=V_min, max=V_max}
+Cl = {distribution=uniform, min=Cl_min, max=Cl_max}
+V2 = {distribution=uniform, min=V2_min, max=V2_max}
+Q = {distribution=uniform, min=Q_min, max=Q_max}")
+
+adm <- list(time=0, amount=1000) # list(time=seq(0,66,by=12), amount=100)
+y <- list(name="y", time=study_t) #seq(18, 80, by=6))
+Cc <- list(name="Cc", time=study_t ) #seq(0,100, by=0.5))
+V <- list(name="V")
+p <- c(V_min=10, V_max=100, Cl_min=2, Cl_max=10, 
+       V2_min=10, V2_max=1000, Q_min=1, Q_max=20, adde=0.2)
+g <- list(size=study_n*2) 
+
+model.2cmt.iv.res <- simulx(model    = model.2cmt.iv, 
+              output    = list(Cc,y),
+              parameter = p,
+              treatment = adm,
+              group     = g,
+              settings  = list(seed=123456))
+
+ggplot( model.2cmt.iv.res$Cc, aes(time, Cc, group=id)) +
+  geom_line( alpha=0.2) 
+
+prctilemlx(model.2cmt.iv.res$Cc, number=9, level=90, color="#4682b4" ) 
+```
+
+remove uninformative profiles
+
+```{r}
+#TODO: clean and combine conditions
+
+df.no_elimination <- model.2cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == 2, Cc_std > 0.2) %>% 
+  ungroup()
+
+dim(df.no_elimination)
+
+df.not2CMT <- model.2cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == 6, Cc_std < 0.4) %>% 
+  ungroup()
+
+matched <- sample( intersect( df.no_elimination$id, df.not2CMT$id),
+                   size = study_n,
+                   replace = F )
+
+model.2cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) +
+  labs( title="Before")
+
+model.2cmt.iv.res$Cc %<>%
+  filter( id %in% matched ) 
+
+model.2cmt.iv.res$y %<>%
+  filter( id %in% matched )
+
+model.2cmt.iv.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  ungroup() %>% 
+  ggplot(., aes(time, Cc_std, group=id)) +
+  geom_line(alpha=0.05) +
+  labs( title="After")
+```
+
+## 2CMT extravascular
+```{r}
+model.2cmt.oa <- inlineModel("
+[LONGITUDINAL]
+input = {V, Cl, Q, V2, ka, adde}
+EQUATION:
+Cc = pkmodel(V, k=Cl/V, k12=Q/V, k21=Q/V2, ka)
+
+DEFINITION:
+y = {distribution=lognormal, prediction=Cc, sd=adde}
+
+[INDIVIDUAL]
+input = {V_min, V_max, Cl_min, Cl_max, V2_min, V2_max, Q_min, Q_max, ka_min, ka_max }
+
+DEFINITION:
+V = {distribution=uniform, min=V_min, max=V_max}
+Cl = {distribution=uniform, min=Cl_min, max=Cl_max}
+V2 = {distribution=uniform, min=V2_min, max=V2_max}
+Q = {distribution=uniform, min=Q_min, max=Q_max}
+ka = {distribution=uniform, min=ka_min, max=ka_max}")
+
+adm <- list(time=0, amount=1000) # list(time=seq(0,66,by=12), amount=100)
+y <- list(name="y", time=study_t) #seq(18, 80, by=6))
+Cc <- list(name="Cc", time=study_t ) #seq(0,100, by=0.5))
+V <- list(name="V")
+p <- c(V_min=1, V_max=100, Cl_min=0.1, Cl_max=50, 
+       V2_min=10, V2_max=1000, Q_min=1, Q_max=50, 
+       ka_min=0.1, ka_max=0.7, adde=0.2)
+g <- list(size=study_n*2) 
+
+model.2cmt.oa.res <- simulx(model    = model.2cmt.oa, 
+              output    = list(Cc,y),
+              parameter = p,
+              treatment = adm,
+              group     = g,
+              settings  = list(seed=123456))
+
+df <- model.2cmt.oa.res$Cc %>% 
+  group_by(id) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc))) %>% 
+  filter( time == max(time), Cc_std < 0.2) %>% 
+  ungroup() %>% 
+  arrange( id, time )%>% 
+  sample_n( size=study_n, replace = F)
+
+model.2cmt.oa.res$Cc %<>%
+  filter( id %in% df$id ) 
+
+model.2cmt.oa.res$y %<>%
+  filter( id %in% df$id )
+
+ggplot( model.2cmt.oa.res$Cc, aes(time, Cc, group=id)) +
+  geom_line( alpha=0.2) 
+
+prctilemlx(model.2cmt.oa.res$Cc, number=9, level=90, color="#4682b4" ) 
+```
+# Datasets
+Generating the complete training datasets
+
+## Store
+### Cc
+Deterministic sims
+```{r}
+df.Cc <- rbind( 
+  model.1cmt.iv.res$Cc %>% 
+    mutate( outcome = "1CMT_IV" ),
+  model.2cmt.iv.res$Cc %>% 
+    mutate( outcome = "2CMT_IV" ),
+  model.1cmt.oa.res$Cc %>% 
+    mutate( outcome = "1CMT_OA" ),
+  model.2cmt.oa.res$Cc %>% 
+    mutate( outcome = "2CMT_OA" ) ) 
+
+ggplot( df.Cc, aes(time, Cc, group=interaction(id, outcome)) ) +
+  geom_line( aes(color=outcome), alpha=0.2) +
+  labs( title="Training data (deterministic)",
+        x="Time",
+        y="Concentration",
+        color="Type") +
+  theme_minimal()
+
+df.Cc %>% 
+  select( id, time, DV=Cc, outcome) %>% 
+  write.csv( ., DERIVED_COMPLETE_CC, row.names = F)
+```
+
+### y
+Stochastic sims
+```{r}
+df.y <- rbind( 
+  model.1cmt.iv.res$y %>% 
+    mutate( outcome = "1CMT_IV" ),
+  model.2cmt.iv.res$y %>% 
+    mutate( outcome = "2CMT_IV" ),
+  model.1cmt.oa.res$y %>% 
+    mutate( outcome = "1CMT_OA" ),
+  model.2cmt.oa.res$y %>% 
+    mutate( outcome = "2CMT_OA" ) ) 
+
+ggplot( df.y, aes(time, y, group=interaction(id, outcome)) ) +
+  geom_line( aes(color=outcome), alpha=0.2) +
+  labs( title="Training data (stochastic)",
+        x="Time",
+        y="Concentration",
+        color="Type") +
+  theme_minimal()
+
+df.y %>% 
+  select( id, time, DV=y, outcome) %>% 
+  write.csv( ., DERIVED_COMPLETE_Y, row.names = F)
+```
+
+## Training data
+
+```{r}
+study_timepoints <- c(0, 1, 2, 4, 6, 8, 12, 24 ) 
+```
+
+
+### Deterministic
+
+```{r}
+df.Cc %<>% 
+  group_by(id, outcome) %>%  
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc)),
+          id = as.numeric(levels(id))[id] )
+
+ggplot( df.Cc, aes(time, Cc_std, color=id, group=id)) +
+  geom_line( alpha=0.05) +
+  scale_color_viridis( option="inferno" )+
+  theme_minimal() +
+  theme( legend.position = "none") +
+  facet_wrap( .~outcome) +
+  labs( title="Training Data",
+        subtitle=paste( "Simulations per model:", study_n),
+        y="") 
+```
+
+Select sampling time points, pivot from long to wide, and store. Re-run standardization on this subset so as to prevent cross-over.
+
+```{r}
+df <- df.Cc %>% 
+  filter( time %in% study_timepoints) %>% 
+  group_by( id, outcome ) %>% 
+  mutate( Cc_std = (Cc- min(Cc)) / (max(Cc) - min(Cc)) ) %>% 
+  select( id, outcome, Cc_std, time ) %>% 
+  pivot_wider( names_from = "time", names_prefix="t", values_from = "Cc_std")
+
+write.csv( df, DERIVED_TRAIN_CC, quote = F, row.names = F)
+```
+
+### Stochastic
+Same thing for the y data
+
+```{r}
+df.y %<>% 
+  group_by(id, outcome) %>%  
+  mutate( y_std = (y- min(y)) / (max(y) - min(y)),
+          id = as.numeric(levels(id))[id] )
+
+ggplot( df.y, aes(time, y_std, color=id, group=id)) +
+  geom_line( alpha=0.05) +
+  scale_color_viridis( option="inferno" )+
+  theme_minimal() +
+  theme( legend.position = "none") +
+  facet_wrap( .~outcome) +
+  labs( title="Training Data (stochastic)",
+        subtitle=paste( "Simulations per model:", study_n),
+        y="") 
+```
+
+And selecting our time points
+
+```{r}
+df <- df.y %>% 
+  filter( time %in% study_timepoints ) %>% 
+  group_by( id, outcome ) %>% 
+  mutate( y_std = (y- min(y)) / (max(y) - min(y)) ) %>% 
+  select( id, outcome, y_std, time ) %>% 
+  pivot_wider( names_from = "time", names_prefix="t", values_from = "y_std")
+
+write.csv( df, DERIVED_TRAIN_Y, quote = F, row.names = F)
+```
+
+
